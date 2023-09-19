@@ -43,7 +43,7 @@
 #include "common.h"
 
 // Enables a very verbose logging to stderr useful when debugging
-//#define ENABLE_DEBUG
+#define ENABLE_DEBUG
 
 #ifdef ENABLE_DEBUG
 #define DEBUG(X)                                                               \
@@ -107,7 +107,7 @@ extern void (*__bolt_ind_call_counter_func_pointer)();
 extern void (*__bolt_ind_tailcall_counter_func_pointer)();
 // Function pointers to init/fini trampoline routines in the binary, so we can
 // resume regular execution of these functions that we hooked
-extern void __bolt_start_trampoline();
+extern void __bolt_start_trampoline(void *fini);
 extern void __bolt_fini_trampoline();
 
 #endif
@@ -1406,6 +1406,7 @@ void visitIndCallCounter(IndirectCallHashTable::MapEntry &Entry,
     __write(FD, LineBuf, Ptr - LineBuf);
     return;
   }
+  report("XXX found ind call target\n");
   Ctx->CallFlowTable->get(TargetDesc->Address).Calls += Entry.Val;
   char LineBuf[BufSize];
   char *Ptr = LineBuf;
@@ -1615,6 +1616,7 @@ extern "C" void __attribute((force_align_arg_pointer)) __bolt_instr_setup() {
   __bolt_ind_call_counter_func_pointer = __bolt_instr_indirect_call;
   __bolt_ind_tailcall_counter_func_pointer = __bolt_instr_indirect_tailcall;
   TextBaseAddress = getTextBaseAddress();
+  reportNumber("XXX TextBaseAddress ", TextBaseAddress, 16);
 
   const uint64_t CountersStart =
       reinterpret_cast<uint64_t>(&__bolt_instr_locations[0]);
@@ -1628,15 +1630,19 @@ extern "C" void __attribute((force_align_arg_pointer)) __bolt_instr_setup() {
   const bool Shared = !__bolt_instr_use_pid;
   const uint64_t MapPrivateOrShared = Shared ? MAP_SHARED : MAP_PRIVATE;
 
+  report("mmap counter\n");
   void *Ret =
       __mmap(CountersStart, CountersEnd - CountersStart, PROT_READ | PROT_WRITE,
              MAP_ANONYMOUS | MapPrivateOrShared | MAP_FIXED, -1, 0);
   assert(Ret != MAP_FAILED, "__bolt_instr_setup: Failed to mmap counters!");
+  report("mmap succeeded\n");
 
+  report("mmap metadata\n");
   GlobalMetadataStorage = __mmap(0, 4096, PROT_READ | PROT_WRITE,
                                  MapPrivateOrShared | MAP_ANONYMOUS, -1, 0);
   assert(GlobalMetadataStorage != MAP_FAILED,
          "__bolt_instr_setup: failed to mmap page for metadata!");
+  report("mmap succeeded\n");
 
   GlobalAlloc = new (GlobalMetadataStorage) BumpPtrAllocator;
   // Conservatively reserve 100MiB
@@ -1656,10 +1662,12 @@ extern "C" void __attribute((force_align_arg_pointer)) __bolt_instr_setup() {
       return;
     watchProcess();
   }
+  report("setup finished\n");
 }
 
 extern "C" __attribute((force_align_arg_pointer)) void
 instrumentIndirectCall(uint64_t Target, uint64_t IndCallID) {
+  report("XXX indirect call\n");
   GlobalIndCallCounters[IndCallID].incrementVal(Target, *GlobalAlloc);
 }
 
@@ -1673,6 +1681,38 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_call()
                        "ldp x0, x1, [sp, #288]\n"
                        "bl instrumentIndirectCall\n"
                        RESTORE_ALL
+                       "ret\n"
+                       :::);
+  // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  __asm__ __volatile__("addi sp, sp, -88\n"
+                       "sd a0, 0(sp)\n"
+                       "sd a1, 8(sp)\n"
+                       "sd a2, 16(sp)\n"
+                       "sd a3, 24(sp)\n"
+                       "sd a4, 32(sp)\n"
+                       "sd a5, 40(sp)\n"
+                       "sd a6, 48(sp)\n"
+                       "sd a7, 56(sp)\n"
+                       "sd t4, 64(sp)\n"
+                       "sd t5, 72(sp)\n"
+                       "sd ra, 80(sp)\n"
+                       "mv a0, t5\n"
+                       "mv a1, t6\n"
+                       "call instrumentIndirectCall\n"
+                       "ld a0, 0(sp)\n"
+                       "ld a1, 8(sp)\n"
+                       "ld a2, 16(sp)\n"
+                       "ld a3, 24(sp)\n"
+                       "ld a4, 32(sp)\n"
+                       "ld a5, 40(sp)\n"
+                       "ld a6, 48(sp)\n"
+                       "ld a7, 56(sp)\n"
+                       "ld t4, 64(sp)\n"
+                       "ld t5, 72(sp)\n"
+                       "ld ra, 80(sp)\n"
+                       "addi sp, sp, 88\n"
                        "ret\n"
                        :::);
   // clang-format on
@@ -1697,6 +1737,38 @@ extern "C" __attribute((naked)) void __bolt_instr_indirect_tailcall()
                        "ldp x0, x1, [sp, #288]\n"
                        "bl instrumentIndirectCall\n"
                        RESTORE_ALL
+                       "ret\n"
+                       :::);
+  // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  __asm__ __volatile__("addi sp, sp, -88\n"
+                       "sd a0, 0(sp)\n"
+                       "sd a1, 8(sp)\n"
+                       "sd a2, 16(sp)\n"
+                       "sd a3, 24(sp)\n"
+                       "sd a4, 32(sp)\n"
+                       "sd a5, 40(sp)\n"
+                       "sd a6, 48(sp)\n"
+                       "sd a7, 56(sp)\n"
+                       "sd t4, 64(sp)\n"
+                       "sd t5, 72(sp)\n"
+                       "sd ra, 80(sp)\n"
+                       "mv a0, t5\n"
+                       "mv a1, t6\n"
+                       "call instrumentIndirectCall\n"
+                       "ld a0, 0(sp)\n"
+                       "ld a1, 8(sp)\n"
+                       "ld a2, 16(sp)\n"
+                       "ld a3, 24(sp)\n"
+                       "ld a4, 32(sp)\n"
+                       "ld a5, 40(sp)\n"
+                       "ld a6, 48(sp)\n"
+                       "ld a7, 56(sp)\n"
+                       "ld t4, 64(sp)\n"
+                       "ld t5, 72(sp)\n"
+                       "ld ra, 80(sp)\n"
+                       "addi sp, sp, 88\n"
                        "ret\n"
                        :::);
   // clang-format on
@@ -1726,6 +1798,14 @@ extern "C" __attribute((naked)) void __bolt_instr_start()
                        "br x16\n"
                        :::);
   // clang-format on
+#elif defined(__riscv)
+  // clang-format off
+  __asm__ __volatile__("mv s0, a0\n"
+                       "call __bolt_instr_setup\n"
+                       "mv a0, s0\n"
+                       "tail __bolt_start_trampoline\n"
+                       :::);
+  // clang-format on
 #else
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
@@ -1739,6 +1819,7 @@ extern "C" __attribute((naked)) void __bolt_instr_start()
 
 /// This is hooking into ELF's DT_FINI
 extern "C" void __bolt_instr_fini() {
+  report("fini\n");
 #if defined(__aarch64__)
   // clang-format off
   __asm__ __volatile__(SAVE_ALL
@@ -1748,6 +1829,8 @@ extern "C" void __bolt_instr_fini() {
                        RESTORE_ALL
                        :::);
   // clang-format on
+#elif defined(__riscv)
+  __asm__ __volatile__("call __bolt_fini_trampoline\n" :::);
 #else
   __asm__ __volatile__("call __bolt_fini_trampoline\n" :::);
 #endif

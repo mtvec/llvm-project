@@ -20,12 +20,15 @@ void FixRISCVCallsPass::runOnFunction(BinaryFunction &BF) {
         assert(Target && "Cannot find call target");
 
         auto L = BC.scopeLock();
+        auto Offset = MIB->getOffset(*II);
 
         if (MIB->isTailCall(*II))
           MIB->createTailCall(*II, Target, Ctx);
         else
           MIB->createCall(*II, Target, Ctx);
 
+        if (Offset)
+          MIB->setOffset(*II, *Offset);
         ++II;
         continue;
       }

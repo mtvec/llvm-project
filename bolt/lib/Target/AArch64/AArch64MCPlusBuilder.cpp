@@ -1502,7 +1502,7 @@ public:
 
   InstructionListType
   createInstrIncMemory(const MCSymbol *Target, MCContext *Ctx, bool IsLeaf,
-                       unsigned CodePointerSize) const override {
+                       unsigned CodePointerSize) override {
     unsigned int I = 0;
     InstructionListType Instrs(IsLeaf ? 12 : 10);
 

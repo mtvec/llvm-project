@@ -144,6 +144,7 @@ struct JITLinkLinker::Context : jitlink::JITLinkContext {
       LLVM_DEBUG(dbgs() << "Resolved to address 0x0\n");
       AllResults[Symbol.first] =
           orc::ExecutorSymbolDef(orc::ExecutorAddr(0), JITSymbolFlags());
+      dbgs() << "XXX null sym: " << SymName << "\n";
     }
 
     LC->run(std::move(AllResults));
@@ -176,6 +177,13 @@ void JITLinkLinker::loadObject(MemoryBufferRef Obj,
   auto LG = jitlink::createLinkGraphFromObject(Obj);
   if (auto E = LG.takeError()) {
     errs() << "BOLT-ERROR: JITLink failed: " << E << '\n';
+    exit(1);
+  }
+
+  if ((*LG)->getTargetTriple().getArch() != BC.TheTriple->getArch()) {
+    errs() << "BOLT-ERROR: linking object withg arch "
+           << (*LG)->getTargetTriple().getArchName()
+           << " into context with arch " << BC.TheTriple->getArchName() << "\n";
     exit(1);
   }
 

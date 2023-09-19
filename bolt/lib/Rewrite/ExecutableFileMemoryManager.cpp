@@ -90,6 +90,7 @@ public:
       : Alloc(std::move(Alloc)) {}
 
   virtual void abandon(OnAbandonedFunction OnAbandoned) override {
+    OnAbandoned(Error::success());
     llvm_unreachable("unexpected abandoned allocation");
   }
 

@@ -14,7 +14,10 @@
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "bolt/Core/MCPlusBuilder.h"
 #include "llvm/BinaryFormat/ELF.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCInstBuilder.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/Format.h"
@@ -276,6 +279,8 @@ public:
     default:
       return false;
     case RISCV::C_J:
+    case RISCV::PseudoCALL:
+    case RISCV::PseudoTAIL:
       OpNum = 0;
       return true;
     case RISCV::AUIPC:
@@ -439,6 +444,328 @@ public:
 
     assert(Second.getOpcode() == RISCV::JALR);
     return true;
+  }
+
+  bool createMarker(MCInst &Inst, int I) const {
+    Inst.clear();
+    Inst.setOpcode(RISCV::ADDI);
+    Inst.addOperand(MCOperand::createReg(RISCV::X0));
+    Inst.addOperand(MCOperand::createReg(RISCV::X0));
+    Inst.addOperand(MCOperand::createImm(I));
+    return true;
+  }
+
+  void createLI(InstructionListType &Insts, unsigned Reg, int64_t Imm) {
+    assert(isInt<12>(Imm) && "not supported");
+    auto ADDI =
+        MCInstBuilder(RISCV::ADDI).addReg(Reg).addReg(RISCV::X0).addImm(Imm);
+    Insts.push_back(ADDI);
+  }
+
+  void replaceIndJumpWithLoadAddress(MCInst &Jump, unsigned DestReg) {
+    switch (Jump.getOpcode()) {
+    default:
+      llvm_unreachable("unsupported indirect jump");
+    case RISCV::JALR:
+      Jump.setOpcode(RISCV::ADDI);
+      Jump.getOperand(0).setReg(DestReg);
+      break;
+    case RISCV::C_JALR:
+    case RISCV::C_JR: {
+      auto TargetReg = Jump.getOperand(0).getReg();
+      Jump = MCInstBuilder(RISCV::ADDI)
+                 .addReg(DestReg)
+                 .addReg(TargetReg)
+                 .addImm(0);
+    }
+    }
+  }
+
+  // InstructionListType
+  // createInstrumentedIndirectCall(MCInst &&CallInst, MCSymbol *HandlerFuncAddr,
+  //                                int CallSiteID, MCContext *Ctx) override {
+  //   InstructionListType Insts;
+  //   createMarker(Insts.emplace_back(), 11);
+
+  //   auto IsTailCall = isTailCall(CallInst);
+  //   createStackSaveArea(Insts.emplace_back(), IsTailCall ? 3 : 2);
+
+  //   if (IsTailCall)
+  //     createRegStackSave(Insts.emplace_back(), RISCV::X1, 2);
+
+  //   // Compute target: replace jalr with addi and rd with t0
+  //   replaceIndJumpWithLoadAddress(CallInst, RISCV::X5);
+  //   stripAnnotations(CallInst);
+  //   Insts.push_back(CallInst);
+  //   createRegStackSave(Insts.emplace_back(), RISCV::X5, 1);
+
+  //   // Store CallSiteID on the stack.
+  //   createLI(Insts, RISCV::X5, CallSiteID);
+  //   createRegStackSave(Insts.emplace_back(), RISCV::X5, 0);
+
+  //   createCall(Insts.emplace_back(), HandlerFuncAddr, Ctx);
+
+  //   return Insts;
+  // }
+
+  InstructionListType
+  createInstrumentedIndirectCall(MCInst &&CallInst, MCSymbol *HandlerFuncAddr,
+                                 int CallSiteID, MCContext *Ctx) override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 11);
+
+    auto IsTailCall = isTailCall(CallInst);
+
+    // Compute target: replace jalr with addi and rd with t0
+    replaceIndJumpWithLoadAddress(CallInst, RISCV::X30);
+    stripAnnotations(CallInst);
+    Insts.push_back(CallInst);
+
+    // Store CallSiteID on the stack.
+    createLI(Insts, RISCV::X31, CallSiteID);
+
+    if (IsTailCall)
+      createTailCall(Insts.emplace_back(), HandlerFuncAddr, Ctx);
+    else
+      createCall(Insts.emplace_back(), HandlerFuncAddr, Ctx);
+
+    return Insts;
+  }
+
+  void createLoad(InstructionListType &Insts, unsigned DestReg,
+                const MCSymbol *Target, MCContext *Ctx) {
+    auto &AUIPC = Insts.emplace_back();
+    AUIPC.setOpcode(RISCV::AUIPC);
+    AUIPC.addOperand(MCOperand::createReg(DestReg));
+    AUIPC.addOperand(MCOperand::createExpr(
+        RISCVMCExpr::create(MCSymbolRefExpr::create(Target, *Ctx),
+                            RISCVMCExpr::VK_RISCV_PCREL_HI, *Ctx)));
+    auto *AUIPCLabel = Ctx->createNamedTempSymbol();
+    setLabel(AUIPC, AUIPCLabel);
+
+    auto &LD = Insts.emplace_back();
+    LD.setOpcode(RISCV::LD);
+    LD.addOperand(MCOperand::createReg(DestReg));
+    LD.addOperand(MCOperand::createReg(DestReg));
+    LD.addOperand(MCOperand::createExpr(
+        RISCVMCExpr::create(MCSymbolRefExpr::create(AUIPCLabel, *Ctx),
+                            RISCVMCExpr::VK_RISCV_PCREL_LO, *Ctx)));
+  }
+
+  void createBranch(MCInst &Inst, unsigned Opcode, unsigned RS1, unsigned RS2,
+                    const MCSymbol *Target, MCContext *Ctx) {
+    Inst = MCInstBuilder(Opcode).addReg(RS1).addReg(RS2).addExpr(
+        MCSymbolRefExpr::create(Target, *Ctx));
+  }
+
+  void createBEQZ(MCInst &Inst, unsigned Reg, const MCSymbol *Target,
+                  MCContext *Ctx) {
+    createBranch(Inst, RISCV::BEQ, Reg, RISCV::X0, Target, Ctx);
+  }
+
+  void createIndirectCall(MCInst &Inst, unsigned Reg, int Offset = 0) const {
+    Inst =
+        MCInstBuilder(RISCV::JALR).addReg(RISCV::X1).addReg(Reg).addImm(Offset);
+  }
+
+  void createIndirectJump(MCInst &Inst, unsigned Reg, int Offset = 0) const {
+    Inst =
+        MCInstBuilder(RISCV::JALR).addReg(RISCV::X0).addReg(Reg).addImm(Offset);
+  }
+
+  void createMV(MCInst &Inst, unsigned Dest, unsigned Src) const {
+    Inst = MCInstBuilder(RISCV::ADDI).addReg(Dest).addReg(Src).addImm(0);
+  }
+
+  InstructionListType
+  createInstrumentedIndCallHandlerEntryBB(const MCSymbol *InstrTrampoline,
+                                          const MCSymbol *IndCallHandler,
+                                          MCContext *Ctx) override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 1);
+    createMV(Insts.emplace_back(), RISCV::X29, RISCV::X1);
+    createLoad(Insts, RISCV::X5, InstrTrampoline, Ctx);
+    createBEQZ(Insts.emplace_back(), RISCV::X5, IndCallHandler, Ctx);
+    createIndirectCall(Insts.emplace_back(), RISCV::X5);
+    createCall(RISCV::PseudoTAIL, Insts.emplace_back(), IndCallHandler, Ctx);
+    return Insts;
+  }
+
+  // InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
+  //   InstructionListType Insts;
+  //   createRegStackRestore(Insts.emplace_back(), RISCV::X5, 1);
+  //   restoreStackSaveArea(Insts.emplace_back(), 2);
+  //   createIndirectJump(Insts.emplace_back(), RISCV::X5);
+  //   return Insts;
+  // }
+
+  InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
+    InstructionListType Insts;
+    createMV(Insts.emplace_back(), RISCV::X1, RISCV::X29);
+    createIndirectJump(Insts.emplace_back(), RISCV::X30);
+    return Insts;
+  }
+
+  // InstructionListType
+  // createInstrumentedIndTailCallHandlerExitBB() const override {
+  //   InstructionListType Insts;
+  //   createRegStackRestore(Insts.emplace_back(), RISCV::X1, 2);
+  //   createRegStackRestore(Insts.emplace_back(), RISCV::X5, 1);
+  //   restoreStackSaveArea(Insts.emplace_back(), 3);
+  //   createIndirectJump(Insts.emplace_back(), RISCV::X5);
+  //   return Insts;
+  // }
+
+  InstructionListType
+  createInstrumentedIndTailCallHandlerExitBB() const override {
+    InstructionListType Insts;
+    createMV(Insts.emplace_back(), RISCV::X1, RISCV::X29);
+    createIndirectJump(Insts.emplace_back(), RISCV::X30);
+    return Insts;
+  }
+
+  InstructionListType createNumCountersGetter(MCContext *Ctx) const override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 4);
+    return Insts;
+  }
+
+  InstructionListType
+  createInstrLocationsGetter(MCContext *Ctx) const override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 5);
+    return Insts;
+  }
+
+  InstructionListType createInstrTablesGetter(MCContext *Ctx) const override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 6);
+    return Insts;
+  }
+
+  InstructionListType createInstrNumFuncsGetter(MCContext *Ctx) const override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 7);
+    return Insts;
+  }
+
+  InstructionListType createSymbolTrampoline(const MCSymbol *TgtSym,
+                                             MCContext *Ctx) override {
+    InstructionListType Insts;
+    createTailCall(Insts.emplace_back(), TgtSym, Ctx);
+    return Insts;
+  }
+
+  InstructionListType createDummyReturnFunction(MCContext *Ctx) const override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 9);
+    return Insts;
+  }
+
+  void createRegInc(MCInst &Inst, unsigned Reg, int64_t Imm) const {
+    Inst.setOpcode(RISCV::ADDI);
+    Inst.addOperand(MCOperand::createReg(Reg));
+    Inst.addOperand(MCOperand::createReg(Reg));
+    Inst.addOperand(MCOperand::createImm(Imm));
+  }
+
+  void createSPInc(MCInst &Inst, int64_t Imm) const {
+    createRegInc(Inst, RISCV::X2, Imm);
+  }
+
+  void createStackSaveArea(MCInst &Inst, unsigned NumRegs) {
+    createSPInc(Inst, NumRegs * -8);
+  }
+
+  void createRegStackSave(MCInst &Inst, unsigned Reg, unsigned RegOffset) {
+    createStore(Inst, Reg, RISCV::X2, RegOffset * 8);
+  }
+
+  void createRegStackRestore(MCInst &Inst, unsigned Reg,
+                             unsigned RegOffset) const {
+    createLoad(Inst, Reg, RISCV::X2, RegOffset * 8);
+  }
+
+  void restoreStackSaveArea(MCInst &Inst, unsigned NumRegs) const {
+    createSPInc(Inst, NumRegs * 8);
+  }
+
+  void createStore(MCInst &Inst, unsigned Reg, unsigned BaseReg,
+                   int64_t Offset) const {
+    Inst.setOpcode(RISCV::SD);
+    Inst.addOperand(MCOperand::createReg(Reg));
+    Inst.addOperand(MCOperand::createReg(BaseReg));
+    Inst.addOperand(MCOperand::createImm(Offset));
+  }
+
+  void createLoad(MCInst &Inst, unsigned Reg, unsigned BaseReg,
+                  int64_t Offset) const {
+    Inst.setOpcode(RISCV::LD);
+    Inst.addOperand(MCOperand::createReg(Reg));
+    Inst.addOperand(MCOperand::createReg(BaseReg));
+    Inst.addOperand(MCOperand::createImm(Offset));
+  }
+
+  void spillRegs(InstructionListType &Insts,
+                 const SmallVector<unsigned> &Regs) const {
+    createSPInc(Insts.emplace_back(), -Regs.size() * 8);
+
+    int64_t Offset = 0;
+    for (auto Reg : Regs) {
+      createStore(Insts.emplace_back(), Reg, RISCV::X2, Offset);
+      Offset += 8;
+    }
+  }
+
+  void reloadRegs(InstructionListType &Insts,
+                  const SmallVector<unsigned> &Regs) {
+    int64_t Offset = 0;
+    for (auto Reg : Regs) {
+      createLoad(Insts.emplace_back(), Reg, RISCV::X2, Offset);
+      Offset += 8;
+    }
+
+    createSPInc(Insts.emplace_back(), Regs.size() * 8);
+  }
+
+  InstructionListType
+  createInstrIncMemory(const MCSymbol *Target, MCContext *Ctx, bool IsLeaf,
+                       unsigned CodePointerSize) override {
+    InstructionListType Insts;
+    createMarker(Insts.emplace_back(), 42);
+
+    spillRegs(Insts, {RISCV::X5, RISCV::X6});
+
+    auto &AUIPC = Insts.emplace_back();
+    AUIPC.setOpcode(RISCV::AUIPC);
+    AUIPC.addOperand(MCOperand::createReg(RISCV::X5));
+    AUIPC.addOperand(MCOperand::createExpr(
+        RISCVMCExpr::create(MCSymbolRefExpr::create(Target, *Ctx),
+                            RISCVMCExpr::VK_RISCV_PCREL_HI, *Ctx)));
+    auto *AUIPCLabel = Ctx->createNamedTempSymbol();
+    setLabel(AUIPC, AUIPCLabel);
+
+    auto &LD = Insts.emplace_back();
+    LD.setOpcode(RISCV::LD);
+    LD.addOperand(MCOperand::createReg(RISCV::X6));
+    LD.addOperand(MCOperand::createReg(RISCV::X5));
+    LD.addOperand(MCOperand::createExpr(
+        RISCVMCExpr::create(MCSymbolRefExpr::create(AUIPCLabel, *Ctx),
+                            RISCVMCExpr::VK_RISCV_PCREL_LO, *Ctx)));
+
+    createRegInc(Insts.emplace_back(), RISCV::X6, 1);
+
+    auto &SD = Insts.emplace_back();
+    SD.setOpcode(RISCV::SD);
+    SD.addOperand(MCOperand::createReg(RISCV::X6));
+    SD.addOperand(MCOperand::createReg(RISCV::X5));
+    SD.addOperand(MCOperand::createExpr(
+        RISCVMCExpr::create(MCSymbolRefExpr::create(AUIPCLabel, *Ctx),
+                            RISCVMCExpr::VK_RISCV_PCREL_LO, *Ctx)));
+
+    reloadRegs(Insts, {RISCV::X5, RISCV::X6});
+
+    return Insts;
   }
 };
 

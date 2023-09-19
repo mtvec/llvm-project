@@ -391,6 +391,7 @@ void Instrumentation::instrumentFunction(BinaryFunction &Function,
       uint32_t ToOffset = TargetBB ? TargetBB->getInputOffset() : 0;
       BinaryFunction *TargetFunc =
           TargetBB ? &Function : BC.getFunctionForSymbol(Target);
+      if (TargetFunc)
       if (TargetFunc && BC.MIB->isCall(Inst)) {
         if (opts::InstrumentCalls) {
           const BinaryBasicBlock *ForeignBB =

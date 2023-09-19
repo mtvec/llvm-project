@@ -52,6 +52,7 @@ void RuntimeLibrary::loadLibrary(StringRef LibPath, BOLTLinker &Linker,
   check_error(MaybeBuf.getError(), LibPath);
   std::unique_ptr<MemoryBuffer> B = std::move(MaybeBuf.get());
   file_magic Magic = identify_magic(B->getBuffer());
+  dbgs() << "XXX loading " << LibPath << "\n";
 
   if (Magic == file_magic::archive) {
     Error Err = Error::success();
