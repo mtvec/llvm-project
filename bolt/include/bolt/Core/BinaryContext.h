@@ -1241,6 +1241,8 @@ public:
                          const MCCodeEmitter *Emitter = nullptr) const {
     if (auto Size = MIB->getAnnotationWithDefault<uint32_t>(Inst, "Size"))
       return Size;
+    if (isRISCV())
+      return MIB->getSize(Inst);
 
     if (!Emitter)
       Emitter = this->MCE.get();

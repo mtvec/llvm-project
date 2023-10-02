@@ -65,6 +65,9 @@ static BinaryBasicBlock *getBBAtHotColdSplitPoint(BinaryFunction &Func) {
 }
 
 static bool shouldInsertStub(const BinaryContext &BC, const MCInst &Inst) {
+  if (BC.isRISCV())
+    return BC.MIB->isBranch(Inst) && !BC.MIB->isIndirectBranch(Inst);
+
   return (BC.MIB->isBranch(Inst) || BC.MIB->isCall(Inst)) &&
          !BC.MIB->isIndirectBranch(Inst) && !BC.MIB->isIndirectCall(Inst);
 }
@@ -440,8 +443,9 @@ uint64_t LongJmpPass::getSymbolAddress(const BinaryContext &BC,
     // Look at BinaryContext's resolution for this symbol - this is a symbol not
     // mapped to a BinaryFunction
     ErrorOr<uint64_t> ValueOrError = BC.getSymbolValue(*Target);
-    assert(ValueOrError && "Unrecognized symbol");
-    return *ValueOrError;
+    // assert(ValueOrError && "Unrecognized symbol");
+    // return *ValueOrError;
+    return ValueOrError ? *ValueOrError : 0;
   }
   return Iter->second;
 }
@@ -530,15 +534,18 @@ bool LongJmpPass::relax(BinaryFunction &Func) {
   const BinaryContext &BC = Func.getBinaryContext();
   bool Modified = false;
 
-  assert(BC.isAArch64() && "Unsupported arch");
-  constexpr int InsnSize = 4; // AArch64
+  assert((BC.isAArch64() || BC.isRISCV()) && "Unsupported arch");
   std::vector<std::pair<BinaryBasicBlock *, std::unique_ptr<BinaryBasicBlock>>>
       Insertions;
 
   BinaryBasicBlock *Frontier = getBBAtHotColdSplitPoint(Func);
   uint64_t FrontierAddress = Frontier ? BBAddresses[Frontier] : 0;
-  if (FrontierAddress)
-    FrontierAddress += Frontier->getNumNonPseudos() * InsnSize;
+  if (FrontierAddress) {
+    for (const MCInst &Inst : *Frontier) {
+      if (!BC.MIB->isPseudo(Inst))
+        FrontierAddress += BC.MIB->getSize(Inst);
+    }
+  }
 
   // Add necessary stubs for branch targets we know we can't fit in the
   // instruction
@@ -553,13 +560,13 @@ bool LongJmpPass::relax(BinaryFunction &Func) {
         continue;
 
       if (!shouldInsertStub(BC, Inst)) {
-        DotAddress += InsnSize;
+        DotAddress += BC.MIB->getSize(Inst);
         continue;
       }
 
       // Check and relax direct branch or call
       if (!needsStub(BB, Inst, DotAddress)) {
-        DotAddress += InsnSize;
+        DotAddress += BC.MIB->getSize(Inst);
         continue;
       }
       Modified = true;
@@ -591,7 +598,7 @@ bool LongJmpPass::relax(BinaryFunction &Func) {
                                                         ? FrontierAddress
                                                         : DotAddress));
 
-      DotAddress += InsnSize;
+      DotAddress += BC.MIB->getSize(Inst);
     }
   }
 

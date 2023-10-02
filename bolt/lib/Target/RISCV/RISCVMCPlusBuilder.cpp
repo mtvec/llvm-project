@@ -64,6 +64,50 @@ public:
     Regs |= getAliases(RISCV::X27);
   }
 
+  int getPCRelEncodingSize(const MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      llvm_unreachable("unsupported opcode");
+    case RISCV::PseudoCALL:
+    case RISCV::PseudoTAIL:
+    case RISCV::PseudoJump:
+      return 32;
+    case RISCV::JAL:
+      return 21;
+    case RISCV::BEQ:
+    case RISCV::BNE:
+    case RISCV::BLT:
+    case RISCV::BGE:
+    case RISCV::BLTU:
+    case RISCV::BGEU:
+      return 21;
+      return 13;
+    case RISCV::C_J:
+      return 12;
+    case RISCV::C_BEQZ:
+    case RISCV::C_BNEZ:
+      return 9;
+    }
+  }
+
+  size_t getSize(const MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      return Info->get(Inst.getOpcode()).getSize();
+    case RISCV::BEQ:
+    case RISCV::BNE:
+    case RISCV::BLT:
+    case RISCV::BGE:
+    case RISCV::BLTU:
+    case RISCV::BGEU:
+      return 8;
+    }
+  }
+
+  int getShortJmpEncodingSize() const override { return 32; }
+
+  int getUncondBranchEncodingSize() const override { return 32; }
+
   bool shouldRecordCodeRelocation(uint64_t RelType) const override {
     switch (RelType) {
     case ELF::R_RISCV_JAL:
@@ -107,6 +151,7 @@ public:
       return MCPlusBuilder::isPseudo(Inst);
     case RISCV::PseudoCALL:
     case RISCV::PseudoTAIL:
+    case RISCV::PseudoJump:
       return false;
     }
   }
@@ -217,6 +262,7 @@ public:
     case RISCV::JALR:
     case RISCV::C_J:
     case RISCV::C_JR:
+    case RISCV::PseudoJump:
       break;
     }
 
@@ -236,11 +282,12 @@ public:
 
   bool createUncondBranch(MCInst &Inst, const MCSymbol *TBB,
                           MCContext *Ctx) const override {
-    Inst.setOpcode(RISCV::JAL);
+    Inst.setOpcode(RISCV::PseudoJump);
     Inst.clear();
-    Inst.addOperand(MCOperand::createReg(RISCV::X0));
-    Inst.addOperand(MCOperand::createExpr(
-        MCSymbolRefExpr::create(TBB, MCSymbolRefExpr::VK_None, *Ctx)));
+    Inst.addOperand(MCOperand::createReg(RISCV::X3));
+    Inst.addOperand(MCOperand::createExpr(RISCVMCExpr::create(
+        MCSymbolRefExpr::create(TBB, MCSymbolRefExpr::VK_None, *Ctx),
+        RISCVMCExpr::VK_RISCV_CALL, *Ctx)));
     return true;
   }
 
@@ -334,6 +381,7 @@ public:
     case RISCV::JAL:
     case RISCV::C_BEQZ:
     case RISCV::C_BNEZ:
+    case RISCV::PseudoJump:
       OpNum = 1;
       return true;
     case RISCV::BEQ:

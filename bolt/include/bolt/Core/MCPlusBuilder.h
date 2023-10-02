@@ -652,6 +652,10 @@ public:
     return StringRef();
   }
 
+  virtual size_t getSize(const MCInst &Inst) const {
+    return Info->get(Inst.getOpcode()).getSize();
+  }
+
   /// Interface and basic functionality of a MCInstMatcher. The idea is to make
   /// it easy to match one or more MCInsts against a tree-like pattern and
   /// extract the fragment operands. Example:
