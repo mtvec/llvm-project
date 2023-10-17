@@ -10,6 +10,34 @@
 #include <sys/types.h>
 #include <time.h>
 
+#define SAVE_ALL                                                               \
+  "addi sp, sp, -88\n"                                                         \
+  "sd a0, 0(sp)\n"                                                             \
+  "sd a1, 8(sp)\n"                                                             \
+  "sd a2, 16(sp)\n"                                                            \
+  "sd a3, 24(sp)\n"                                                            \
+  "sd a4, 32(sp)\n"                                                            \
+  "sd a5, 40(sp)\n"                                                            \
+  "sd a6, 48(sp)\n"                                                            \
+  "sd a7, 56(sp)\n"                                                            \
+  "sd t4, 64(sp)\n"                                                            \
+  "sd t5, 72(sp)\n"                                                            \
+  "sd ra, 80(sp)\n"
+
+#define RESTORE_ALL                                                            \
+  "ld a0, 0(sp)\n"                                                             \
+  "ld a1, 8(sp)\n"                                                             \
+  "ld a2, 16(sp)\n"                                                            \
+  "ld a3, 24(sp)\n"                                                            \
+  "ld a4, 32(sp)\n"                                                            \
+  "ld a5, 40(sp)\n"                                                            \
+  "ld a6, 48(sp)\n"                                                            \
+  "ld a7, 56(sp)\n"                                                            \
+  "ld t4, 64(sp)\n"                                                            \
+  "ld t5, 72(sp)\n"                                                            \
+  "ld ra, 80(sp)\n"                                                            \
+  "addi sp, sp, 88\n"
+
 #define STRINGIFY(X) #X
 #define XSTRINGIFY(X) STRINGIFY(X)
 

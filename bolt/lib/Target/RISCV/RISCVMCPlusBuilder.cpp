@@ -12,6 +12,7 @@
 
 #include "MCTargetDesc/RISCVMCExpr.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
+#include "MCTargetDesc/RISCVMatInt.h"
 #include "bolt/Core/MCPlusBuilder.h"
 #include "bolt/Utils/CommandLineOpts.h"
 #include "llvm/BinaryFormat/ELF.h"
@@ -545,23 +546,60 @@ public:
                                                      MCSymbol *HandlerFuncAddr,
                                                      int CallSiteID,
                                                      MCContext *Ctx) override {
-    return {};
+    // jalr/c.jalr/c.jr offset(xi) is replaced with:
+    // addi t5, xi, offset
+    // li t6, CallSiteID
+    // call/tail HandlerFuncAddr
+    InstructionListType Insts;
+
+    auto IsTailCall = isTailCall(CallInst);
+
+    // Compute target: replace jalr with addi and rd with t0
+    replaceIndJumpWithLoadAddress(CallInst, RISCV::X30);
+    stripAnnotations(CallInst);
+    Insts.push_back(CallInst);
+
+    // Store CallSiteID on the stack.
+    createLI(Insts, RISCV::X31, CallSiteID);
+
+    if (IsTailCall)
+      createTailCall(Insts.emplace_back(), HandlerFuncAddr, Ctx);
+    else
+      createCall(Insts.emplace_back(), HandlerFuncAddr, Ctx);
+
+    return Insts;
   }
 
   InstructionListType
   createInstrumentedIndCallHandlerEntryBB(const MCSymbol *InstrTrampoline,
                                           const MCSymbol *IndCallHandler,
                                           MCContext *Ctx) override {
-    return {};
+    // mv t4, ra
+    // ld t0, InstrTrampoline
+    // beqz t0, IndCallHandler
+    // jalr t0
+    // tail IndCallHandler
+    InstructionListType Insts;
+    createMV(Insts.emplace_back(), RISCV::X29, RISCV::X1);
+    createLoad(Insts, RISCV::X5, InstrTrampoline, *Ctx);
+    createBEQZ(Insts.emplace_back(), RISCV::X5, IndCallHandler, Ctx);
+    createIndirectCall(Insts.emplace_back(), RISCV::X5);
+    createCall(RISCV::PseudoTAIL, Insts.emplace_back(), IndCallHandler, Ctx);
+    return Insts;
   }
 
   InstructionListType createInstrumentedIndCallHandlerExitBB() const override {
-    return {};
+    // mv ra, t4
+    // jr t5
+    InstructionListType Insts;
+    createMV(Insts.emplace_back(), RISCV::X1, RISCV::X29);
+    createIndirectJump(Insts.emplace_back(), RISCV::X30);
+    return Insts;
   }
 
   InstructionListType
   createInstrumentedIndTailCallHandlerExitBB() const override {
-    return {};
+    return createInstrumentedIndCallHandlerExitBB();
   }
 
   InstructionListType createNumCountersGetter(MCContext *Ctx) const override {
@@ -586,6 +624,10 @@ public:
     InstructionListType Insts;
     createTailCall(Insts.emplace_back(), TgtSym, Ctx);
     return Insts;
+  }
+
+  InstructionListType createDummyReturnFunction(MCContext *Ctx) const override {
+    return {};
   }
 
   const RISCVMCExpr *createSymbolRefExpr(const MCSymbol *Target,
@@ -617,6 +659,89 @@ public:
   void createLA(InstructionListType &Insts, unsigned DestReg,
                 const MCSymbol *Target, MCContext &Ctx) const {
     createAuipcInstPair(Insts, DestReg, Target, RISCV::ADDI, Ctx);
+  }
+
+  void createLoad(InstructionListType &Insts, unsigned DestReg,
+                  const MCSymbol *Target, MCContext &Ctx) {
+    createAuipcInstPair(Insts, DestReg, Target, RISCV::LD, Ctx);
+  }
+
+  void createBranch(MCInst &Inst, unsigned Opcode, unsigned RS1, unsigned RS2,
+                    const MCSymbol *Target, MCContext *Ctx) {
+    Inst = MCInstBuilder(Opcode).addReg(RS1).addReg(RS2).addExpr(
+        MCSymbolRefExpr::create(Target, *Ctx));
+  }
+
+  void createBEQZ(MCInst &Inst, unsigned Reg, const MCSymbol *Target,
+                  MCContext *Ctx) {
+    createBranch(Inst, RISCV::BEQ, Reg, RISCV::X0, Target, Ctx);
+  }
+
+  void createIndirectCall(MCInst &Inst, unsigned Reg, int Offset = 0) const {
+    Inst =
+        MCInstBuilder(RISCV::JALR).addReg(RISCV::X1).addReg(Reg).addImm(Offset);
+  }
+
+  void createIndirectJump(MCInst &Inst, unsigned Reg, int Offset = 0) const {
+    Inst =
+        MCInstBuilder(RISCV::JALR).addReg(RISCV::X0).addReg(Reg).addImm(Offset);
+  }
+
+  void createMV(MCInst &Inst, unsigned Dest, unsigned Src) const {
+    Inst = MCInstBuilder(RISCV::ADDI).addReg(Dest).addReg(Src).addImm(0);
+  }
+
+  void createLI(InstructionListType &Insts, unsigned DestReg, int64_t Imm) {
+    RISCVMatInt::InstSeq Seq =
+        RISCVMatInt::generateInstSeq(Imm, STI->getFeatureBits());
+    MCRegister SrcReg = RISCV::X0;
+
+    for (const RISCVMatInt::Inst &Inst : Seq) {
+      switch (Inst.getOpndKind()) {
+      case RISCVMatInt::Imm:
+        Insts.push_back(MCInstBuilder(Inst.getOpcode())
+                            .addReg(DestReg)
+                            .addImm(Inst.getImm()));
+        break;
+      case RISCVMatInt::RegX0:
+        Insts.push_back(MCInstBuilder(Inst.getOpcode())
+                            .addReg(DestReg)
+                            .addReg(SrcReg)
+                            .addReg(RISCV::X0));
+        break;
+      case RISCVMatInt::RegReg:
+        Insts.push_back(MCInstBuilder(Inst.getOpcode())
+                            .addReg(DestReg)
+                            .addReg(SrcReg)
+                            .addReg(SrcReg));
+        break;
+      case RISCVMatInt::RegImm:
+        Insts.push_back(MCInstBuilder(Inst.getOpcode())
+                            .addReg(DestReg)
+                            .addReg(SrcReg)
+                            .addImm(Inst.getImm()));
+        break;
+      }
+
+      // Only the first instruction has X0 as its source.
+      SrcReg = DestReg;
+    }
+  }
+
+  void replaceIndJumpWithLoadAddress(MCInst &Jump, unsigned DestReg) {
+    switch (Jump.getOpcode()) {
+    default:
+      llvm_unreachable("unsupported indirect jump");
+    case RISCV::JALR:
+      Jump.setOpcode(RISCV::ADDI);
+      Jump.getOperand(0).setReg(DestReg);
+      break;
+    case RISCV::C_JALR:
+    case RISCV::C_JR: {
+      unsigned TargetReg = Jump.getOperand(0).getReg();
+      createMV(Jump, DestReg, TargetReg);
+    }
+    }
   }
 
   void createRegInc(MCInst &Inst, unsigned Reg, int64_t Imm) const {
@@ -669,12 +794,6 @@ MCPlusBuilder *createRISCVMCPlusBuilder(const MCInstrAnalysis *Analysis,
                                         const MCInstrInfo *Info,
                                         const MCRegisterInfo *RegInfo,
                                         const MCSubtargetInfo *STI) {
-  if (opts::Instrument && !STI->getFeatureBits()[RISCV::FeatureStdExtA]) {
-    errs() << "BOLT-ERROR: Instrumention on RISC-V requires the A extension "
-              "but it is not enabled for the input binary";
-    exit(1);
-  }
-
   return new RISCVMCPlusBuilder(Analysis, Info, RegInfo, STI);
 }
 
