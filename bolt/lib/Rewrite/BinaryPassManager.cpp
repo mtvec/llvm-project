@@ -464,9 +464,9 @@ void BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
     Manager.registerPass(std::make_unique<LongJmpPass>(PrintLongJmp));
   }
 
-  if (BC.isRISCV()) {
-    Manager.registerPass(std::make_unique<LongJmpPass>(PrintLongJmp));
-  }
+  // if (BC.isRISCV()) {
+  //   Manager.registerPass(std::make_unique<LongJmpPass>(PrintLongJmp));
+  // }
 
   // This pass should always run last.*
   Manager.registerPass(std::make_unique<FinalizeFunctions>(PrintFinalized));

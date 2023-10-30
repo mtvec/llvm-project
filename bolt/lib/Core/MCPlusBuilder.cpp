@@ -440,6 +440,67 @@ bool MCPlusBuilder::hasUseOfPhysReg(const MCInst &MI, unsigned Reg) const {
   return false;
 }
 
+DenseMap<const MCInst *, SmallVector<MCInst *, 4>>
+MCPlusBuilder::computeLocalUDChain(const MCInst *CurInstr,
+                                   InstructionIterator Begin,
+                                   InstructionIterator End) const {
+  DenseMap<int, MCInst *> RegAliasTable;
+  DenseMap<const MCInst *, SmallVector<MCInst *, 4>> Uses;
+
+  auto addInstrOperands = [&](const MCInst &Instr) {
+    // Update Uses table
+    for (const MCOperand &Operand : MCPlus::primeOperands(Instr)) {
+      if (!Operand.isReg())
+        continue;
+      unsigned Reg = Operand.getReg();
+      MCInst *AliasInst = RegAliasTable[Reg];
+      Uses[&Instr].push_back(AliasInst);
+      LLVM_DEBUG({
+        dbgs() << "Adding reg operand " << Reg << " refs ";
+        if (AliasInst != nullptr)
+          AliasInst->dump();
+        else
+          dbgs() << "\n";
+      });
+    }
+  };
+
+  LLVM_DEBUG(dbgs() << "computeLocalUDChain\n");
+  bool TerminatorSeen = false;
+  for (auto II = Begin; II != End; ++II) {
+    MCInst &Instr = *II;
+    // Ignore nops and CFIs
+    if (isPseudo(Instr) || isNoop(Instr))
+      continue;
+    if (TerminatorSeen) {
+      RegAliasTable.clear();
+      Uses.clear();
+    }
+
+    LLVM_DEBUG(dbgs() << "Now updating for:\n ");
+    LLVM_DEBUG(Instr.dump());
+    addInstrOperands(Instr);
+
+    BitVector Regs = BitVector(RegInfo->getNumRegs(), false);
+    getWrittenRegs(Instr, Regs);
+
+    // Update register definitions after this point
+    for (int Idx : Regs.set_bits()) {
+      RegAliasTable[Idx] = &Instr;
+      LLVM_DEBUG(dbgs() << "Setting reg " << Idx << " def to current instr.\n");
+    }
+
+    TerminatorSeen = isTerminator(Instr);
+  }
+
+  // Process the last instruction, which is not currently added into the
+  // instruction stream
+  if (CurInstr)
+    addInstrOperands(*CurInstr);
+
+  return Uses;
+}
+
 const BitVector &MCPlusBuilder::getAliases(MCPhysReg Reg,
                                            bool OnlySmaller) const {
   if (OnlySmaller)

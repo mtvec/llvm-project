@@ -645,6 +645,8 @@ public:
     return false;
   }
 
+  virtual bool isEpilogue(const MCInst &Inst) const { return false; }
+
   /// Used to fill the executable space with instructions
   /// that will trap.
   virtual StringRef getTrapFillValue() const {
@@ -1348,6 +1350,10 @@ public:
   /// Return true if this instruction uses the specified physical
   /// register either explicitly or implicitly.
   virtual bool hasUseOfPhysReg(const MCInst &MI, unsigned Reg) const;
+
+  DenseMap<const MCInst *, SmallVector<MCInst *, 4>>
+  computeLocalUDChain(const MCInst *CurInstr, InstructionIterator Begin,
+                      InstructionIterator End) const;
 
   /// Replace displacement in compound memory operand with given \p Label.
   bool replaceMemOperandDisp(MCInst &Inst, const MCSymbol *Label,

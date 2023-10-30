@@ -796,6 +796,7 @@ BinaryFunction::processIndirectBranch(MCInst &Instruction, unsigned Size,
     }
   }
 
+  dbgs() << "XXX " << *this << "\n";
   IndirectBranchType BranchType = BC.MIB->analyzeIndirectBranch(
       Instruction, Begin, Instructions.end(), PtrSize, MemLocInstr, BaseRegNum,
       IndexRegNum, DispValue, DispExpr, PCRelBaseInstr);
@@ -857,7 +858,8 @@ BinaryFunction::processIndirectBranch(MCInst &Instruction, unsigned Size,
     ArrayStart = static_cast<uint64_t>(DispValue);
   }
 
-  if (BaseRegNum == BC.MRI->getProgramCounter())
+  if (BC.MRI->getProgramCounter() != BC.MIB->getNoRegister() &&
+      BaseRegNum == BC.MRI->getProgramCounter())
     ArrayStart += getAddress() + Offset + Size;
 
   LLVM_DEBUG(dbgs() << "BOLT-DEBUG: addressed memory is 0x"
@@ -1851,9 +1853,8 @@ bool BinaryFunction::postProcessIndirectBranches(
       // If this block contains an epilogue code and has an indirect branch,
       // then most likely it's a tail call. Otherwise, we cannot tell for sure
       // what it is and conservatively reject the function's CFG.
-      bool IsEpilogue = llvm::any_of(BB, [&](const MCInst &Instr) {
-        return BC.MIB->isLeave(Instr) || BC.MIB->isPop(Instr);
-      });
+      bool IsEpilogue = llvm::any_of(
+          BB, [&](const MCInst &Instr) { return BC.MIB->isEpilogue(Instr); });
       if (IsEpilogue) {
         BC.MIB->convertJmpToTailCall(Instr);
         BB.removeAllSuccessors();

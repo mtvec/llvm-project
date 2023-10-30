@@ -467,7 +467,7 @@ BinaryContext::handleAddressRef(uint64_t Address, BinaryFunction &BF,
 
 MemoryContentsType BinaryContext::analyzeMemoryAt(uint64_t Address,
                                                   BinaryFunction &BF) {
-  if (!isX86())
+  if (!isX86() && !isRISCV())
     return MemoryContentsType::UNKNOWN;
 
   ErrorOr<BinarySection &> Section = getSectionForAddress(Address);

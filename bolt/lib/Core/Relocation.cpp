@@ -117,6 +117,7 @@ static bool isSupportedRISCV(uint64_t Type) {
   case ELF::R_RISCV_HI20:
   case ELF::R_RISCV_LO12_I:
   case ELF::R_RISCV_LO12_S:
+  case ELF::R_RISCV_32_PCREL:
   case ELF::R_RISCV_64:
   case ELF::R_RISCV_TLS_GOT_HI20:
   case ELF::R_RISCV_TPREL_HI20:
@@ -569,6 +570,7 @@ static uint64_t extractValueRISCV(uint64_t Type, uint64_t Contents,
     return SignExtend64<8>(((Contents >> 2) & 0x1f) | ((Contents >> 5) & 0xe0));
   case ELF::R_RISCV_ADD32:
   case ELF::R_RISCV_SUB32:
+  case ELF::R_RISCV_32_PCREL:
   case ELF::R_RISCV_64:
     return Contents;
   }

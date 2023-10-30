@@ -2550,6 +2550,10 @@ void RewriteInstance::handleRelocation(const SectionRef &RelocatedSection,
     return;
   }
 
+  if (BC->isRISCV() && !IsFromCode && IsToCode) {
+    BC->addPCRelativeDataRelocation(Rel.getOffset());
+  }
+
   bool ForceRelocation = BC->forceSymbolRelocations(SymbolName);
   if ((BC->isAArch64() || BC->isRISCV()) && Relocation::isGOT(RType))
     ForceRelocation = true;

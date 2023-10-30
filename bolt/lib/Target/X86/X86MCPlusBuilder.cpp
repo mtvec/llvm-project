@@ -348,6 +348,10 @@ public:
     }
   }
 
+  bool isEpilogue(const MCInst &Inst) const override {
+    return isLeave(Inst) || isPop(Inst);
+  }
+
   bool mayLoad(const MCInst &Inst) const override {
     if (isPop(Inst))
       return true;

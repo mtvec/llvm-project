@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "MCTargetDesc/RISCVBaseInfo.h"
 #include "MCTargetDesc/RISCVMCExpr.h"
 #include "MCTargetDesc/RISCVMCTargetDesc.h"
 #include "MCTargetDesc/RISCVMatInt.h"
@@ -170,6 +171,34 @@ public:
     }
   }
 
+  MCInst uncompress(const MCInst &Inst) const {
+    MCInst FullInst;
+    if (RISCVRVC::uncompress(FullInst, Inst, *STI))
+      return FullInst;
+    return Inst;
+  }
+
+  bool isEpilogue(const MCInst &Inst) const override {
+    MCInst FullInst = uncompress(Inst);
+    switch (FullInst.getOpcode()) {
+    default:
+      return false;
+    case RISCV::ADDI:
+      return FullInst.getOperand(0).getReg() == RISCV::X2 &&
+             FullInst.getOperand(1).getReg() == RISCV::X2 &&
+             FullInst.getOperand(2).getImm() > 0;
+    }
+  }
+
+  MCInst::iterator getMemOperandDisp(MCInst &Inst) const override {
+    switch (Inst.getOpcode()) {
+    default:
+      return Inst.end();
+    case RISCV::AUIPC:
+      return Inst.begin() + 1;
+    }
+  }
+
   bool hasPCRelOperand(const MCInst &Inst) const override {
     switch (Inst.getOpcode()) {
     default:
@@ -226,17 +255,73 @@ public:
     return true;
   }
 
+  // auipc a1, 0x5f
+  // addi  a1, a1, 1060 # 84d40 <.LJTI650_0>
+  // add   a0, a0, a1
+  // lw    a0, 0(a0)
+  // add   a0, a0, a1
+  // jr    a0
+  bool
+  matchJumpTable(const MCInst &Inst,
+                 DenseMap<const MCInst *, SmallVector<MCInst *, 4>> &UDChain,
+                 const MCExpr *&JumpTable, int64_t &Offset, int64_t &ScaleValue,
+                 MCInst *&PCRelBase) const {
+    assert(Inst.getOpcode() == RISCV::JALR || Inst.getOpcode() == RISCV::C_JR);
+
+    if (Inst.getOpcode() == RISCV::JALR &&
+        Inst.getOperand(0).getReg() != RISCV::X0)
+      return false;
+
+    using UsesVec = SmallVector<MCInst *, 4>;
+    UsesVec &UsesRoot = UDChain[&Inst];
+    if (UsesRoot.size() == 0 || UsesRoot[0] == nullptr)
+      return false;
+
+    const MCInst *DefTgtAdd = UsesRoot[0];
+    if (DefTgtAdd->getOpcode() != RISCV::ADD &&
+        DefTgtAdd->getOpcode() != RISCV::C_ADD)
+      return false;
+
+    UsesVec &UsesTgtAdd = UDChain[DefTgtAdd];
+    assert(UsesTgtAdd.size() == 3);
+    if (!UsesTgtAdd[1] || !UsesTgtAdd[2]) {
+      return false;
+    }
+
+    const MCInst *DefBaseAddi = UsesTgtAdd[2];
+    if (DefBaseAddi->getOpcode() != RISCV::ADDI &&
+        DefBaseAddi->getOpcode() != RISCV::C_ADDI)
+      return false;
+
+    DefBaseAddi->dump();
+
+    UsesVec &UsesBaseAddi = UDChain[DefBaseAddi];
+    assert(UsesBaseAddi.size() == 2);
+    if (!UsesBaseAddi[1]) {
+      return false;
+    }
+
+    MCInst *DefBaseAuipc = UsesBaseAddi[1];
+    if (DefBaseAuipc->getOpcode() != RISCV::AUIPC)
+      return false;
+
+    assert(DefBaseAuipc->getOperand(1).isExpr());
+    JumpTable = DefBaseAuipc->getOperand(1).getExpr();
+    PCRelBase = DefBaseAuipc;
+    return true;
+  }
+
   IndirectBranchType analyzeIndirectBranch(
       MCInst &Instruction, InstructionIterator Begin, InstructionIterator End,
       const unsigned PtrSize, MCInst *&MemLocInstr, unsigned &BaseRegNum,
       unsigned &IndexRegNum, int64_t &DispValue, const MCExpr *&DispExpr,
-      MCInst *&PCRelBaseOut) const override {
+      MCInst *&PCRelBase) const override {
     MemLocInstr = nullptr;
     BaseRegNum = 0;
     IndexRegNum = 0;
     DispValue = 0;
     DispExpr = nullptr;
-    PCRelBaseOut = nullptr;
+    PCRelBase = nullptr;
 
     // Check for the following long tail call sequence:
     // 1: auipc xi, %pcrel_hi(sym)
@@ -246,6 +331,15 @@ public:
       if (isRISCVCall(PrevInst, Instruction) &&
           Instruction.getOperand(0).getReg() == RISCV::X0)
         return IndirectBranchType::POSSIBLE_TAIL_CALL;
+    }
+
+    DenseMap<const MCInst *, SmallVector<llvm::MCInst *, 4>> UDChain =
+        computeLocalUDChain(&Instruction, Begin, End);
+    int64_t ScaleValue;
+    if (matchJumpTable(Instruction, UDChain, DispExpr, DispValue, ScaleValue,
+                       PCRelBase)) {
+      MemLocInstr = PCRelBase;
+      return IndirectBranchType::POSSIBLE_PIC_JUMP_TABLE;
     }
 
     return IndirectBranchType::UNKNOWN;
@@ -333,7 +427,7 @@ public:
         break;
 
       // Handle unconditional branches.
-      if (isUnconditionalBranch(*I)) {
+      if (isUnconditionalBranch(*I) && !isIndirectBranch(*I)) {
         // If any code was seen after this unconditional branch, we've seen
         // unreachable code. Ignore them.
         CondBranch = nullptr;
@@ -423,6 +517,13 @@ public:
     return getTargetSymbol(Op.getExpr());
   }
 
+  std::pair<const MCSymbol *, uint64_t>
+  getTargetSymbolInfo(const MCExpr *Expr) const override {
+    if (const auto *RISCVExpr = dyn_cast<RISCVMCExpr>(Expr))
+      return MCPlusBuilder::getTargetSymbolInfo(RISCVExpr->getSubExpr());
+    return MCPlusBuilder::getTargetSymbolInfo(Expr);
+  }
+
   bool lowerTailCall(MCInst &Inst) override {
     removeAnnotation(Inst, MCPlus::MCAnnotation::kTailCall);
     if (getConditionalTailCall(Inst))
@@ -496,6 +597,7 @@ public:
     case ELF::R_RISCV_TLS_GOT_HI20:
       // The GOT is reused so no need to create GOT relocations
     case ELF::R_RISCV_PCREL_HI20:
+    case 0:
       return RISCVMCExpr::create(Expr, RISCVMCExpr::VK_RISCV_PCREL_HI, Ctx);
     case ELF::R_RISCV_PCREL_LO12_I:
     case ELF::R_RISCV_PCREL_LO12_S:
